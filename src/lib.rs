@@ -50,25 +50,9 @@ impl Client {
 
         extend(dst, b"\r\n");
 
-        let base_fut = tcp.and_then(move |mut s: TcpStream| {
-            let poll_fut = match s.poll_write(&mut dst_vec) {
-                Ok(Async::Ready(_)) => {
-                    trace!("poll_write Ready");
-                    futures::future::ok(())
-                }
-                Ok(Async::NotReady) => {
-                    // do I need to retry now?
-                    trace!("poll_write NotReady");
-                    futures::future::err(io::Error::from(io::ErrorKind::Other))
-                }
-                Err(_) => {
-                    error!("poll_write error");
-                    futures::future::err(io::Error::from(io::ErrorKind::Other))
-                }
-            };
-
-            poll_fut.and_then(|_| {
-                s.poll_read
+        let base_fut = tcp.and_then(move |mut stream| {
+            tokio::io::write_all(stream, dst_vec).and_then(|stream, vec| {
+                tokio::io::read_to_end(stream, Vec::new())
             })
         });
 
