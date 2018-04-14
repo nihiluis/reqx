@@ -70,7 +70,7 @@ impl Client {
                             break;
                         }
                     }
-                    
+
                     let status = res.parse(&vec).expect("response should not be broken");
                     let code = res.code.unwrap_or(0);
 
