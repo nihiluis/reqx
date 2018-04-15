@@ -7,14 +7,17 @@ extern crate futures;
 use futures::Future;
 
 fn main() {
-    let _request = http::Request::get(
-        "https://min-api.cryptocompare.com/data/histoday?fsym=BTC&tsym=USD&limit=5&aggregate=3&e=CCCAGG")
+    let request = http::Request::get(
+        "http://api.jikan.moe/anime/1/episodes")
+        //.header(http::header::USER_AGENT, "Mozilla/5.0 (X11; Linux x86_64; rv:59.0) Gecko/20100101 Firefox/59.0")
+        .header(http::header::CONNECTION, "keep-alive")
+        //.header(http::header::ACCEPT_ENCODING, "gzip, deflate, br")
         .body(())
         .unwrap();
 
     let c = reqrs::Client {};
 
-    let jfut = c.json::<(), ()>(_request).map_err(|e| {
+    let jfut = c.json::<(), ()>(request).map_err(|e| {
         println!("{:?}", e);
 
         ()
