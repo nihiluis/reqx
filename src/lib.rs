@@ -221,19 +221,30 @@ fn read_all(
     mut body_start_index: usize,
 ) -> Box<Future<Item = ClientResponse, Error = io::Error> + Send + 'static> {
     // this can be easily replaced with read_to_end
-    let fut = futures::future::loop_fn((stream, vec), |(stream, mut vec)| {
-        tokio_io::io::read(stream, vec![0; 1024]).and_then(|(stream, vec2, read_len)| {
-            if read_len == 0 {
-                return Ok(futures::future::Loop::Break((stream, vec)));
+    let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
+      mut vec,
+      mut read_len,
+      mut zero_len_count)| {
+        tokio_io::io::read(stream, vec![0; 1024]).and_then(move |(stream, mut vec2, len)| {
+            println!("read {} bytes", len);
+            if len == 0 {
+                return Ok(futures::future::Loop::Break(
+                    (stream, vec, read_len, zero_len_count),
+                ));
             }
+
+            vec2.truncate(len);
+            read_len += len;
 
             vec.extend_from_slice(&vec2);
 
-            Ok(futures::future::Loop::Continue((stream, vec)))
+            Ok(futures::future::Loop::Continue(
+                (stream, vec, read_len, zero_len_count),
+            ))
         })
     });
 
-    Box::new(fut.and_then(move |(_, mut vec)| {
+    Box::new(fut.and_then(move |(_, mut vec, read_len, _)| {
         let f_res = match res_complete {
             false => {
                 body_start_index = get_body_start_index(&vec);
@@ -256,7 +267,9 @@ fn read_all(
             true => f_res.unwrap(),
         };
 
+        println!("read length: {}", read_len);
         println!("{}", String::from_utf8_lossy(&vec));
+        println!("vec_len {}", String::from_utf8_lossy(&vec));
         join_chunks(&mut vec, body_start_index);
 
         let body = bytes::BytesMut::with_capacity(vec.len()).freeze();
