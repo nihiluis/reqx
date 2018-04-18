@@ -319,57 +319,30 @@ fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) {
     let mut start_index = body_start_index;
     //println!("{}", String::from_utf8_lossy(vec));
     let mut vec2: Vec<u8> = Vec::new();
+    println!("starting to join chunks at {}", start_index);
     loop {
         let (chunk_size, chunk_size_byte_size) = get_chunk_size(vec, start_index);
-
-        let chunk_start = start_index; // why dont i add htis + chunk_size_byte_size + 3;
         println!("chunk_size: {}", chunk_size);
-        vec2.extend_from_slice(&vec[chunk_start..chunk_start + chunk_size as usize]);
+        if chunk_size == 0 {
+            break;
+        }
+        let chunk_end = start_index + chunk_size as usize;
+        vec2.extend_from_slice(&vec[start_index..chunk_end + 1]);
+        println!(
+            "chunk length for chunksize {} is {}",
+            chunk_size,
+            vec2.len()
+        );
 
-        start_index = chunk_start + chunk_size as usize + 1;
+        start_index = chunk_end + 1;
 
+        println!("Left ChunK");
+        println!("{}", String::from_utf8_lossy(&vec[chunk_end..vec.len()]));
         println!("==\n\n");
     }
 
     let st = String::from_utf8(vec2).unwrap();
     println!("{}|{}", st.len(), st);
-}
-
-fn _remove_chunk_info_from_vec(vec: &mut Vec<u8>, body_start_index: usize) {
-    let mut start_index = body_start_index;
-    loop {
-        let (chunk_size, chunk_size_byte_size) = get_chunk_size(vec, start_index);
-
-        if chunk_size == 0 {
-            //let mut vec_len = vec.len();
-            // remove all terminating chars
-            /*loop {
-                println!("{}", vec[vec_len - 1]);
-                if vec[vec_len - 1] != b'\r' && vec[vec_len - 1] != b'\n' {
-                    println!("breaking");
-                    break;
-                }
-
-                vec_len -= 1;
-                vec.pop();
-            }*/
-            println!("truncating");
-            vec.truncate(start_index);
-            break;
-        }
-
-        let chunk_end = chunk_size;
-        println!("start_index: {}", start_index);
-        println!("chunk_size: {}", chunk_size);
-        println!("chunk_end {}", chunk_end as usize);
-        // if that is efficient ....
-
-        println!("vec length {}", vec.len());
-        println!("Vec:");
-        //println!("{}", String::from_utf8_lossy(&vec));
-
-        start_index = chunk_end as usize;
-    }
 }
 
 // returns (chunk_size, byte size of the chunk_size)
