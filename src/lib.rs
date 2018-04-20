@@ -19,31 +19,19 @@ use tokio::net::TcpStream;
 use http::Request;
 use futures::Future;
 use http::HeaderMap;
-use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{BufMut, BytesMut};
 
 const INITIAL_BUF_SIZE: usize = 512;
 
 pub struct Client {}
 
-pub struct ClientResponse {
-    pub resp: http::Response<()>,
-    pub body: bytes::Bytes,
-}
-
-impl ClientResponse {
-    pub fn new(resp: http::Response<()>, body: bytes::Bytes) -> Self {
-        ClientResponse {
-            resp: resp,
-            body: body,
-        }
-    }
-}
-
-type ClientFuture = Box<Future<Item = ClientResponse, Error = io::Error> + Send + 'static>;
+type ClientResponse = http::Response<Vec<u8>>;
 
 impl Client {
-    fn request<A, B>(self, req: Request<A>) -> ClientFuture {
+    fn request<A>(
+        self,
+        req: Request<A>,
+    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send + 'static {
         let uri = req.uri().clone();
         let host = uri.host().unwrap();
         let port = if let Some(p) = uri.port() { p } else { 80 };
@@ -85,11 +73,12 @@ impl Client {
                     tokio_io::io::read(stream, initial_vec)
                 })
                 .and_then(|(stream, vec, _)| {
-                    let mut content_length = 0;
+                    // TODO this is missing atm
+                    let content_length = 0;
 
                     let mut body_complete = false;
                     let mut res_complete = false;
-                    let mut chunked_encoding = false;
+                    let chunked_encoding;
 
                     let f_res: Option<http::Response<()>>;
                     let code: u16;
@@ -111,26 +100,21 @@ impl Client {
                         };
                     }
 
-                    let mut new_target_length = 0;
-
                     // i think the vec.len check is redundant
                     if content_length != 0 && content_length <= INITIAL_BUF_SIZE ||
                         vec.len() < INITIAL_BUF_SIZE
                     {
                         body_complete = true;
-                    } else if content_length != 0 {
-                        new_target_length = content_length - INITIAL_BUF_SIZE;
                     }
 
                     let mut body_start_index = 0;
-                    let mut chunk_size = 0;
                     if res_complete {
                         body_start_index = get_body_start_index(&vec);
                     }
 
                     if code == 301 {
                         // unhandled redirect
-                        println!("Unable to handle redirect.");
+                        error!("Unable to handle redirect.");
                         return futures::future::Either::B(
                             futures::future::err(io::Error::from(io::ErrorKind::Other)),
                         );
@@ -140,27 +124,34 @@ impl Client {
                         futures::future::Either::A(continue_read(
                             stream,
                             vec,
-                            new_target_length,
                             res_complete,
                             f_res,
                             chunked_encoding,
                             body_start_index,
                         ))
                     } else {
-                        let body = bytes::BytesMut::with_capacity(vec.len()).freeze();
-                        println!("{}", String::from_utf8(vec.clone()).unwrap());
-                        let client_res = ClientResponse::new(f_res.unwrap(), body);
+                        let client_res = apply_body_to_res(f_res.unwrap(), vec);
 
                         futures::future::Either::B(futures::future::ok(client_res))
                     }
                 })
         });
 
-        Box::new(base_fut)
+        base_fut
     }
 
-    pub fn json<A, B>(self, req: Request<A>) -> ClientFuture {
-        self.request::<A, B>(req)
+    pub fn json<A, B>(self, req: Request<A>) -> impl Future<Item = B, Error = io::Error>
+    where
+        B: serde::de::DeserializeOwned,
+    {
+        // apply headers
+
+        self.request::<A>(req).and_then(|r| {
+            let (_, body) = r.into_parts();
+            let parsed: Result<B, serde_json::Error> = serde_json::from_slice(&body);
+
+            futures::future::result(parsed).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+        })
     }
 }
 
@@ -186,10 +177,24 @@ fn get_res(res: httparse::Response) -> http::Response<()> {
         .unwrap()
 }
 
+#[inline]
+fn get_res_with_body(res: httparse::Response, body: Vec<u8>) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(res.code.unwrap_or(0))
+        .body(body)
+        .unwrap()
+}
+
+#[inline]
+fn apply_body_to_res(res: http::Response<()>, body: Vec<u8>) -> http::Response<Vec<u8>> {
+    let (parts, _) = res.into_parts();
+
+    http::Response::from_parts(parts, body)
+}
+
 fn continue_read(
     stream: TcpStream,
     vec: Vec<u8>,
-    new_target_length: usize,
     res_complete: bool,
     f_res: Option<http::Response<()>>,
     chunk_encoded: bool,
@@ -206,27 +211,26 @@ fn continue_read(
         stream,
         vec,
         res_complete,
-        f_res,
         chunk_encoded,
+        f_res,
         body_start_index,
     )
 }
 
 fn read_all(
     stream: TcpStream,
-    mut vec: Vec<u8>,
+    vec: Vec<u8>,
     res_complete: bool,
+    chunk_encoding: bool,
     f_res: Option<http::Response<()>>,
-    chunk_encoded: bool,
     mut body_start_index: usize,
 ) -> Box<Future<Item = ClientResponse, Error = io::Error> + Send + 'static> {
     // this can be easily replaced with read_to_end
     let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
       mut vec,
       mut read_len,
-      mut zero_len_count)| {
+      zero_len_count)| {
         tokio_io::io::read(stream, vec![0; 1024]).and_then(move |(stream, mut vec2, len)| {
-            println!("read {} bytes", len);
             if len == 0 {
                 return Ok(futures::future::Loop::Break(
                     (stream, vec, read_len, zero_len_count),
@@ -244,7 +248,7 @@ fn read_all(
         })
     });
 
-    Box::new(fut.and_then(move |(_, mut vec, read_len, _)| {
+    Box::new(fut.and_then(move |(_, mut vec, _, _)| {
         let f_res = match res_complete {
             false => {
                 body_start_index = get_body_start_index(&vec);
@@ -267,13 +271,11 @@ fn read_all(
             true => f_res.unwrap(),
         };
 
-        println!("read length: {}", read_len);
-        println!("{}", String::from_utf8_lossy(&vec));
-        println!("vec_len {}", String::from_utf8_lossy(&vec));
-        join_chunks(&mut vec, body_start_index);
+        if chunk_encoding {
+            join_chunks(&mut vec, body_start_index);
+        }
 
-        let body = bytes::BytesMut::with_capacity(vec.len()).freeze();
-        let client_res = ClientResponse::new(f_res, body);
+        let client_res = apply_body_to_res(f_res, vec);
 
         futures::future::ok(client_res)
     }))
@@ -298,12 +300,6 @@ fn get_body_start_index(slice: &[u8]) -> usize {
     let mut body_start_index = 0;
     for (i, n) in slice.iter().enumerate() {
         if previous_r && *n == b'\n' {
-            println!(
-                "{}",
-                String::from_utf8_lossy(&slice[i - 3..i])
-                    .replace("\n", "_n")
-                    .replace("\r", "_r")
-            );
             if &slice[i - 3..i] == b"\r\n\r" {
                 body_start_index = i + 1;
                 break;
@@ -330,61 +326,32 @@ fn check_chunk_encoded(res: &httparse::Response) -> bool {
 
 fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) {
     let mut start_index = body_start_index;
-    //println!("{}", String::from_utf8_lossy(vec));
     let mut vec2: Vec<u8> = Vec::new();
-    println!("starting to join chunks at {}", start_index);
+
     loop {
-        let (chunk_size, chunk_size_byte_size) = get_chunk_size(vec, start_index);
-        println!("chunk_size: {}", chunk_size);
+        let chunk_size = get_chunk_size(vec, start_index);
         if chunk_size == 0 {
             break;
         }
         let chunk_end = start_index + chunk_size as usize;
         vec2.extend_from_slice(&vec[start_index..chunk_end + 1]);
-        println!(
-            "chunk length for chunksize {} is {}",
-            chunk_size,
-            vec2.len()
-        );
 
-        start_index = chunk_end + 1;
-
-        println!("Left ChunK");
-        println!("{}", String::from_utf8_lossy(&vec[chunk_end..vec.len()]));
-        println!("==\n\n");
+        start_index = chunk_end + 2;
     }
-
-    let st = String::from_utf8(vec2).unwrap();
-    println!("{}|{}", st.len(), st);
 }
 
 // returns (chunk_size, byte size of the chunk_size)
-fn get_chunk_size(vec: &mut Vec<u8>, start_index: usize) -> (u16, usize) {
+fn get_chunk_size(vec: &mut Vec<u8>, start_index: usize) -> u16 {
     let buf_len = 16;
     let mut buf = BytesMut::with_capacity(buf_len);
-    let mut chunk_size_index = start_index;
 
-
-    /*println!("passed start_index {}", start_index); // is the initial_start_index wrong?
-    println!(
-        "start chunk range \n{}",
-        String::from_utf8_lossy(&vec[start_index - 6..start_index + 4])
-            .replace("\r\n", "==_rn==\r\n")
-    );
-    println!(
-        "possible chunk range \n{}",
-        String::from_utf8_lossy(&vec[start_index - 293..start_index + 500])
-            .replace("\r\n", "==_rn==\r\n")
-    );*/
-
-    if vec[chunk_size_index] == b'\0' {
-        println!("returning chunk size 0");
-        return (0, 1);
+    if vec[start_index] == b'\0' {
+        return 0;
     }
 
     loop {
-        let val = vec[chunk_size_index];
-        vec.remove(chunk_size_index);
+        let val = vec[start_index];
+        vec.remove(start_index);
         if val == b'\r' {
             continue;
         }
@@ -392,7 +359,7 @@ fn get_chunk_size(vec: &mut Vec<u8>, start_index: usize) -> (u16, usize) {
             break;
         }
         if val == b'\0' {
-            return (0, 0);
+            return 0;
         }
 
         if buf.len() == buf_len {
@@ -404,20 +371,11 @@ fn get_chunk_size(vec: &mut Vec<u8>, start_index: usize) -> (u16, usize) {
 
     let buf = buf.freeze();
 
-    /*let chunk_size = std::io::Cursor::new(&buf)
-        .read_u16::<byteorder::BigEndian>()
-        .expect("KDASD");
-    let mut rdr = std::io::Cursor::new(b"160d");
-    let chunk_size = rdr.read_u16::<byteorder::BE>().expect(
-        "Chunk size can not be read as u16",
-    );*/
-
     let buf_str = std::str::from_utf8(&buf).unwrap();
-    println!("tryong to convert {}:{}", buf_str, buf.len());
     if buf.len() == 0 {
-        return (0, 0);
+        return 0;
     }
     let chunk_size = u16::from_str_radix(&buf_str, 16).unwrap();
 
-    (chunk_size, buf.len())
+    chunk_size
 }
