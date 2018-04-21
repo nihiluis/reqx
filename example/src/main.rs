@@ -13,7 +13,9 @@ fn main() {
         .body(())
         .unwrap();
 
-    let c = reqx::Client {};
+    let c = reqx::Client {
+        url: "http://api.jikan.moe/anime/1/episodes",
+    };
 
     let jfut = c.json::<(), ()>(request).map_err(|_| {
 

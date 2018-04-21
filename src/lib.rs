@@ -25,6 +25,11 @@ const INITIAL_BUF_SIZE: usize = 512;
 
 pub struct Client {}
 
+pub struct ClientRequest<'a, A> {
+    pub url: &'a str,
+    pub body: A,
+}
+
 type ClientResponse = http::Response<Vec<u8>>;
 
 impl Client {
@@ -140,11 +145,19 @@ impl Client {
         base_fut
     }
 
-    pub fn json<A, B>(self, req: Request<A>) -> impl Future<Item = B, Error = io::Error>
+    pub fn json_get<'a, A, B>(
+        self,
+        client_req: ClientRequest<'a, A>,
+    ) -> impl Future<Item = B, Error = io::Error>
     where
         B: serde::de::DeserializeOwned,
     {
-        // apply headers
+        let req = http::Request::get(client_req.url)
+            .header(http::header::ACCEPT, "application/json")
+            .header(http::header::CONNECTION, "close")
+            .body(client_req.body)
+            .unwrap();
+
 
         self.request::<A>(req).and_then(|r| {
             let (_, body) = r.into_parts();
