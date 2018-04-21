@@ -27,7 +27,7 @@ pub struct Client {}
 
 pub struct ClientRequest<'a, A> {
     pub url: &'a str,
-    pub body: A,
+    pub body: Option<A>,
 }
 
 type ClientResponse = http::Response<Vec<u8>>;
@@ -145,12 +145,12 @@ impl Client {
         base_fut
     }
 
-    pub fn json_get<'a, A, B>(
+    pub fn json_get<'a, A>(
         self,
-        client_req: ClientRequest<'a, A>,
-    ) -> impl Future<Item = B, Error = io::Error>
+        client_req: ClientRequest<'a, Vec<u8>>,
+    ) -> impl Future<Item = A, Error = io::Error>
     where
-        B: serde::de::DeserializeOwned,
+        A: serde::de::DeserializeOwned,
     {
         let req = http::Request::get(client_req.url)
             .header(http::header::ACCEPT, "application/json")
@@ -159,9 +159,9 @@ impl Client {
             .unwrap();
 
 
-        self.request::<A>(req).and_then(|r| {
+        self.request::<Option<Vec<u8>>>(req).and_then(|r| {
             let (_, body) = r.into_parts();
-            let parsed: Result<B, serde_json::Error> = serde_json::from_slice(&body);
+            let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
 
             futures::future::result(parsed).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
         })
