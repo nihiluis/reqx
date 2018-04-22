@@ -22,7 +22,7 @@ pub struct HeartbeatData {
 
 fn main() {
     let request = reqx::ClientRequest {
-        url: "http://localhost:1995/trader/heartbeat?base=btc&counter=usd&exchange=gdax",
+        url: "http://localhost:1995/trader/data/replace?base=btc&counter=usd&exchange=gdax&id=3",
         body: None,
     };
 

@@ -136,6 +136,7 @@ impl Client {
                             f_res,
                             chunked_encoding,
                             body_start_index,
+                            content_length,
                         ))
                     } else {
                         let body_vec = join_body(&mut vec, body_start_index, content_length);
@@ -222,6 +223,7 @@ fn continue_read(
     f_res: Option<http::Response<()>>,
     chunk_encoded: bool,
     body_start_index: usize,
+    content_length: usize,
 ) -> impl Future<Item = ClientResponse, Error = io::Error> {
     // maybe I should resolve body_start_index here later
     /*
@@ -237,6 +239,7 @@ fn continue_read(
         chunk_encoded,
         f_res,
         body_start_index,
+        content_length,
     )
 }
 
@@ -247,6 +250,7 @@ fn read_all(
     chunk_encoding: bool,
     f_res: Option<http::Response<()>>,
     mut body_start_index: usize,
+    content_length: usize,
 ) -> Box<Future<Item = ClientResponse, Error = io::Error> + Send + 'static> {
     // this can be easily replaced with read_to_end
     let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
@@ -297,7 +301,7 @@ fn read_all(
         let body_vec = match chunk_encoding {
             true => join_chunks(&mut vec, body_start_index),
             // not sure if the last param here is correct
-            false => join_body(&mut vec, body_start_index, read_len - body_start_index),
+            false => join_body(&mut vec, body_start_index, content_length),
         };
 
         let client_res = apply_body_to_res(f_res, body_vec);
