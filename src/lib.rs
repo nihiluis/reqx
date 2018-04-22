@@ -163,7 +163,11 @@ impl Client {
             let (_, body) = r.into_parts();
             let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
 
-            futures::future::result(parsed).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+            futures::future::result(parsed).map_err(|e| {
+                error!("Unable to parse json GET response: {:?}", e);
+
+                io::Error::from(io::ErrorKind::InvalidData)
+            })
         })
     }
 }
