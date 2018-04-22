@@ -20,6 +20,7 @@ use http::Request;
 use futures::Future;
 use http::HeaderMap;
 use bytes::{BufMut, BytesMut};
+use byteorder::ReadBytesExt;
 
 const INITIAL_BUF_SIZE: usize = 512;
 
@@ -77,9 +78,9 @@ impl Client {
                     let initial_vec: Vec<u8> = vec![0; INITIAL_BUF_SIZE];
                     tokio_io::io::read(stream, initial_vec)
                 })
-                .and_then(|(stream, vec, _)| {
+                .and_then(|(stream, mut vec, _)| {
                     // TODO this is missing atm
-                    let content_length = 0;
+                    let mut content_length: usize = 0;
 
                     let mut body_complete = false;
                     let mut res_complete = false;
@@ -98,6 +99,7 @@ impl Client {
 
                         code = res.code.unwrap_or(0);
                         chunked_encoding = check_chunk_encoded(&res);
+                        content_length = check_content_length(&res) as usize;
 
                         f_res = match res_complete {
                             true => Some(get_res(res)),
@@ -105,16 +107,17 @@ impl Client {
                         };
                     }
 
-                    // i think the vec.len check is redundant
-                    if content_length != 0 && content_length <= INITIAL_BUF_SIZE ||
-                        vec.len() < INITIAL_BUF_SIZE
-                    {
-                        body_complete = true;
-                    }
-
                     let mut body_start_index = 0;
                     if res_complete {
                         body_start_index = get_body_start_index(&vec);
+                    }
+
+                    if content_length != 0 &&
+                        content_length + body_start_index <= INITIAL_BUF_SIZE ||
+                        vec.len() < INITIAL_BUF_SIZE
+                    {
+                        vec.truncate(body_start_index + content_length);
+                        body_complete = true;
                     }
 
                     if code == 301 {
@@ -135,7 +138,9 @@ impl Client {
                             body_start_index,
                         ))
                     } else {
-                        let client_res = apply_body_to_res(f_res.unwrap(), vec);
+                        let body_vec = join_body(&mut vec, body_start_index, content_length);
+
+                        let client_res = apply_body_to_res(f_res.unwrap(), body_vec);
 
                         futures::future::Either::B(futures::future::ok(client_res))
                     }
@@ -161,6 +166,7 @@ impl Client {
 
         self.request::<Option<Vec<u8>>>(req).and_then(|r| {
             let (_, body) = r.into_parts();
+            let body_string = String::from_utf8_lossy(&body);
             let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
 
             futures::future::result(parsed).map_err(|e| {
@@ -265,7 +271,7 @@ fn read_all(
         })
     });
 
-    Box::new(fut.and_then(move |(_, mut vec, _, _)| {
+    Box::new(fut.and_then(move |(_, mut vec, read_len, _)| {
         let f_res = match res_complete {
             false => {
                 body_start_index = get_body_start_index(&vec);
@@ -288,11 +294,13 @@ fn read_all(
             true => f_res.unwrap(),
         };
 
-        if chunk_encoding {
-            join_chunks(&mut vec, body_start_index);
-        }
+        let body_vec = match chunk_encoding {
+            true => join_chunks(&mut vec, body_start_index),
+            // not sure if the last param here is correct
+            false => join_body(&mut vec, body_start_index, read_len - body_start_index),
+        };
 
-        let client_res = apply_body_to_res(f_res, vec);
+        let client_res = apply_body_to_res(f_res, body_vec);
 
         futures::future::ok(client_res)
     }))
@@ -317,7 +325,7 @@ fn get_body_start_index(slice: &[u8]) -> usize {
     let mut body_start_index = 0;
     for (i, n) in slice.iter().enumerate() {
         if previous_r && *n == b'\n' {
-            if &slice[i - 3..i] == b"\r\n\r" {
+            if &slice[i - 3..i + 1] == b"\r\n\r\n" {
                 body_start_index = i + 1;
                 break;
             }
@@ -341,7 +349,34 @@ fn check_chunk_encoded(res: &httparse::Response) -> bool {
     false
 }
 
-fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) {
+fn check_content_length(res: &httparse::Response) -> u32 {
+    for header in res.headers.iter() {
+        if header.name == "Content-Length" {
+            let buf_str = std::str::from_utf8(&header.value).unwrap();
+            return buf_str.parse::<u32>().unwrap();
+        }
+    }
+
+    0
+}
+
+fn join_body(vec: &mut Vec<u8>, body_start_index: usize, mut body_length: usize) -> Vec<u8> {
+    let mut vec2: Vec<u8> = Vec::new();
+
+    let body_end: usize;
+    if body_length == 0 {
+        body_end = vec.len() - 2;
+    } else {
+        body_end = body_start_index + body_length;
+    }
+
+    // -2 to remove trailing chars
+    vec2.extend_from_slice(&vec[body_start_index..body_end]);
+
+    vec2
+}
+
+fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) -> Vec<u8> {
     let mut start_index = body_start_index;
     let mut vec2: Vec<u8> = Vec::new();
 
@@ -355,6 +390,8 @@ fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) {
 
         start_index = chunk_end + 2;
     }
+
+    vec2
 }
 
 // returns (chunk_size, byte size of the chunk_size)

@@ -4,3 +4,12 @@ version = "0.1.0"
 authors = ["Alex Smith <donnytyler.com>"]
 
 [dependencies]
+tokio = "0.1"
+futures = "0.1.19"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+bytes = "0.4"
+log = "0.4"
+byteorder = "1"
+reqx = { path = ".." }

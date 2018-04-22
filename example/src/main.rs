@@ -1,24 +1,35 @@
-extern crate http;
-extern crate httparse;
 extern crate tokio;
 extern crate reqx;
 extern crate futures;
+extern crate serde;
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 
 use futures::Future;
 
-fn main() {
-    let request = http::Request::get("http://api.jikan.moe/anime/1/episodes")
-        .header(http::header::ACCEPT, "application/json")
-        .header(http::header::CONNECTION, "close")
-        .body(())
-        .unwrap();
+#[derive(Deserialize, Debug)]
+pub struct HeartbeatDataWrapper {
+    pub message: String,
+    pub data: Option<HeartbeatData>,
+}
 
-    let c = reqx::Client {
-        url: "http://api.jikan.moe/anime/1/episodes",
+#[derive(Deserialize, Debug)]
+pub struct HeartbeatData {
+    pub start: bool,
+    pub id: i32,
+}
+
+fn main() {
+    let request = reqx::ClientRequest {
+        url: "http://localhost:1995/trader/heartbeat?base=btc&counter=usd&exchange=gdax",
+        body: None,
     };
 
-    let jfut = c.json::<(), ()>(request).map_err(|_| {
+    let c = reqx::Client {};
 
+    let jfut = c.json_get::<HeartbeatDataWrapper>(request).map_err(|e| {
+        println!("err: {:?}", e);
         ()
     });
 
