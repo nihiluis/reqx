@@ -151,6 +151,25 @@ impl Client {
         base_fut
     }
 
+    pub fn string_get<'a>(
+        self,
+        client_req: ClientRequest<'a, Vec<u8>>,
+    ) -> impl Future<Item = String, Error = io::Error> {
+        let req = http::Request::get(client_req.url)
+            .header(http::header::CONNECTION, "close")
+            .body(client_req.body)
+            .unwrap();
+
+        self.request::<Option<Vec<u8>>>(req).and_then(|r| {
+            let (_, body) = r.into_parts();
+            let body_string = String::from_utf8(body);
+
+            futures::future::result(body_string).map_err(|e| {
+                io::Error::from(io::ErrorKind::InvalidData)
+            })
+        })
+    }
+
     pub fn json_get<'a, A>(
         self,
         client_req: ClientRequest<'a, Vec<u8>>,
@@ -164,10 +183,9 @@ impl Client {
             .body(client_req.body)
             .unwrap();
 
-
         self.request::<Option<Vec<u8>>>(req).and_then(|r| {
             let (_, body) = r.into_parts();
-            let body_string = String::from_utf8_lossy(&body);
+            //let body_str = std::str::from_utf8(&body);
             let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
 
             futures::future::result(parsed).map_err(|e| {
