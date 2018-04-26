@@ -190,22 +190,38 @@ impl Client {
         })
     }
 
-    pub fn json<'a, A>(
+    pub fn json<'a, A, B>(
         self,
-        client_req: ClientRequest<'a, Vec<u8>>,
+        client_req: ClientRequest<'a, B>,
     ) -> impl Future<Item = A, Error = io::Error>
     where
         A: serde::de::DeserializeOwned,
+        B: serde::Serialize,
     {
-        let req = http::Request::builder()
+
+        let mut req_builder = http::Request::builder();
+        req_builder
             .uri(client_req.url)
             .method(client_req.method)
             .header(http::header::ACCEPT, "application/json")
-            .header(http::header::CONNECTION, "close")
-            .body(client_req.body)
-            .unwrap();
+            .header(http::header::CONNECTION, "close");
 
-        self.request(req).and_then(|r| {
+        let req = match client_req.body {
+            Some(b) => {
+                let parsed =
+                    serde_json::to_string(&b).map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+
+                if parsed.is_err() {
+                    return futures::future::Either::A(futures::future::err(parsed.err().unwrap()));
+                }
+
+                let vec = parsed.unwrap().into_bytes();
+                req_builder.body(Some(vec))
+            }
+            None => req_builder.body(None),
+        }.unwrap();
+
+        futures::future::Either::B(self.request(req).and_then(|r| {
             let (_, body) = r.into_parts();
             //let body_str = std::str::from_utf8(&body);
             let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
@@ -215,7 +231,7 @@ impl Client {
 
                 io::Error::from(io::ErrorKind::InvalidData)
             })
-        })
+        }))
     }
 }
 
