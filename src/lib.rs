@@ -20,13 +20,13 @@ use http::Request;
 use futures::Future;
 use http::HeaderMap;
 use bytes::{BufMut, BytesMut};
-use byteorder::ReadBytesExt;
 
 const INITIAL_BUF_SIZE: usize = 512;
 
 pub struct Client {}
 
 pub struct ClientRequest<'a, A> {
+    pub method: http::Method,
     pub url: &'a str,
     pub body: Option<A>,
 }
@@ -34,14 +34,28 @@ pub struct ClientRequest<'a, A> {
 type ClientResponse = http::Response<Vec<u8>>;
 
 impl Client {
-    fn request<A>(
+    fn request(
         self,
-        req: Request<A>,
+        req: Request<Option<Vec<u8>>>,
     ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send + 'static {
         let uri = req.uri().clone();
         let host = uri.host().unwrap();
         let port = if let Some(p) = uri.port() { p } else { 80 };
-        let method = req.method();
+
+        let (parts, body) = req.into_parts();
+        let method = &parts.method;
+
+        let content_length = match &body {
+            Some(x) => x.len(),
+            None => 0,
+        };
+
+        let mut headers = parts.headers;
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::header::HeaderValue::from_str(content_length.to_string().as_ref())
+                .expect("Header Value from Content Length may not fail"),
+        );
 
         let mut socket_addrs = (host, port).to_socket_addrs().unwrap();
         let socket_addr = socket_addrs.next().unwrap();
@@ -68,9 +82,13 @@ impl Client {
         extend(dst, host.as_bytes());
         extend(dst, b"\r\n");
 
-        write_headers(&req.headers(), dst);
+        write_headers(&mut headers, dst);
 
         extend(dst, b"\r\n");
+
+        if content_length > 0 {
+            extend(dst, &body.unwrap());
+        }
 
         let base_fut = tcp.and_then(move |stream| {
             tokio::io::write_all(stream, dst_vec)
@@ -80,11 +98,11 @@ impl Client {
                 })
                 .and_then(|(stream, mut vec, _)| {
                     // TODO this is missing atm
-                    let mut content_length: usize = 0;
+                    let content_length: usize;
 
                     let mut body_complete = false;
                     let mut res_complete = false;
-                    let chunked_encoding;
+                    let chunked_encoding: bool;
 
                     let f_res: Option<http::Response<()>>;
                     let code: u16;
@@ -151,39 +169,43 @@ impl Client {
         base_fut
     }
 
-    pub fn string_get<'a>(
+    pub fn string<'a>(
         self,
         client_req: ClientRequest<'a, Vec<u8>>,
     ) -> impl Future<Item = String, Error = io::Error> {
-        let req = http::Request::get(client_req.url)
+        let req = http::Request::builder()
+            .uri(client_req.url)
+            .method(client_req.method)
             .header(http::header::CONNECTION, "close")
             .body(client_req.body)
             .unwrap();
 
-        self.request::<Option<Vec<u8>>>(req).and_then(|r| {
+        self.request(req).and_then(|r| {
             let (_, body) = r.into_parts();
             let body_string = String::from_utf8(body);
 
-            futures::future::result(body_string).map_err(|e| {
+            futures::future::result(body_string).map_err(|_| {
                 io::Error::from(io::ErrorKind::InvalidData)
             })
         })
     }
 
-    pub fn json_get<'a, A>(
+    pub fn json<'a, A>(
         self,
         client_req: ClientRequest<'a, Vec<u8>>,
     ) -> impl Future<Item = A, Error = io::Error>
     where
         A: serde::de::DeserializeOwned,
     {
-        let req = http::Request::get(client_req.url)
+        let req = http::Request::builder()
+            .uri(client_req.url)
+            .method(client_req.method)
             .header(http::header::ACCEPT, "application/json")
             .header(http::header::CONNECTION, "close")
             .body(client_req.body)
             .unwrap();
 
-        self.request::<Option<Vec<u8>>>(req).and_then(|r| {
+        self.request(req).and_then(|r| {
             let (_, body) = r.into_parts();
             //let body_str = std::str::from_utf8(&body);
             let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
@@ -220,7 +242,7 @@ fn get_res(res: httparse::Response) -> http::Response<()> {
 }
 
 #[inline]
-fn get_res_with_body(res: httparse::Response, body: Vec<u8>) -> http::Response<Vec<u8>> {
+fn _get_res_with_body(res: httparse::Response, body: Vec<u8>) -> http::Response<Vec<u8>> {
     http::Response::builder()
         .status(res.code.unwrap_or(0))
         .body(body)
@@ -293,7 +315,7 @@ fn read_all(
         })
     });
 
-    Box::new(fut.and_then(move |(_, mut vec, read_len, _)| {
+    Box::new(fut.and_then(move |(_, mut vec, _, _)| {
         let f_res = match res_complete {
             false => {
                 body_start_index = get_body_start_index(&vec);
@@ -382,7 +404,7 @@ fn check_content_length(res: &httparse::Response) -> u32 {
     0
 }
 
-fn join_body(vec: &mut Vec<u8>, body_start_index: usize, mut body_length: usize) -> Vec<u8> {
+fn join_body(vec: &mut Vec<u8>, body_start_index: usize, body_length: usize) -> Vec<u8> {
     let mut vec2: Vec<u8> = Vec::new();
 
     let body_end: usize;
