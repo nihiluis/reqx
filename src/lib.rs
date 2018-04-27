@@ -192,11 +192,11 @@ impl Client {
 
     pub fn json<'a, A, B>(
         self,
-        client_req: ClientRequest<'a, B>,
-    ) -> impl Future<Item = A, Error = io::Error>
+        client_req: ClientRequest<'a, A>,
+    ) -> impl Future<Item = B, Error = io::Error>
     where
-        A: serde::de::DeserializeOwned,
-        B: serde::Serialize,
+        B: serde::de::DeserializeOwned,
+        A: serde::Serialize,
     {
 
         let mut req_builder = http::Request::builder();
@@ -224,7 +224,7 @@ impl Client {
         futures::future::Either::B(self.request(req).and_then(|r| {
             let (_, body) = r.into_parts();
             //let body_str = std::str::from_utf8(&body);
-            let parsed: Result<A, serde_json::Error> = serde_json::from_slice(&body);
+            let parsed: Result<B, serde_json::Error> = serde_json::from_slice(&body);
 
             futures::future::result(parsed).map_err(|e| {
                 error!("Unable to parse json GET response: {:?}", e);
