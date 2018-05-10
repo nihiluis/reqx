@@ -15,6 +15,7 @@ extern crate log;
 
 use std::net::ToSocketAddrs;
 use std::io;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use http::Request;
 use futures::Future;
@@ -61,6 +62,9 @@ impl Client {
         let socket_addr = socket_addrs.next().unwrap();
 
         let tcp = TcpStream::connect(&socket_addr);
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).expect(
+            "set_read_timeout call failed",
+        );
 
         let mut dst_vec: Vec<u8> = Vec::new();
         let dst = &mut dst_vec;
@@ -203,6 +207,7 @@ impl Client {
         req_builder
             .uri(client_req.url)
             .method(client_req.method)
+            .header(http::header::CONTENT_TYPE, "application/json")
             .header(http::header::ACCEPT, "application/json")
             .header(http::header::CONNECTION, "close");
 
