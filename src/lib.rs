@@ -15,12 +15,13 @@ extern crate log;
 
 use std::net::ToSocketAddrs;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use http::Request;
 use futures::Future;
 use http::HeaderMap;
 use bytes::{BufMut, BytesMut};
+use tokio::util::FutureExt;
 
 const INITIAL_BUF_SIZE: usize = 512;
 
@@ -62,9 +63,6 @@ impl Client {
         let socket_addr = socket_addrs.next().unwrap();
 
         let tcp = TcpStream::connect(&socket_addr);
-        tcp.set_read_timeout(Some(Duration::from_secs(5))).expect(
-            "set_read_timeout call failed",
-        );
 
         let mut dst_vec: Vec<u8> = Vec::new();
         let dst = &mut dst_vec;
@@ -93,6 +91,8 @@ impl Client {
         if content_length > 0 {
             extend(dst, &body.unwrap());
         }
+
+        let when = Instant::now() + Duration::from_secs(5);
 
         let base_fut = tcp.and_then(move |stream| {
             tokio::io::write_all(stream, dst_vec)
@@ -168,6 +168,8 @@ impl Client {
                         futures::future::Either::B(futures::future::ok(client_res))
                     }
                 })
+                .deadline(when)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         });
 
         base_fut
