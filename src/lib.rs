@@ -161,9 +161,9 @@ impl Client {
                             content_length,
                         ))
                     } else {
-                        let body_vec = join_body(&mut vec, body_start_index, content_length);
+                        join_body(&mut vec, body_start_index, content_length);
 
-                        let client_res = apply_body_to_res(f_res.unwrap(), body_vec);
+                        let client_res = apply_body_to_res(f_res.unwrap(), vec);
 
                         futures::future::Either::B(futures::future::ok(client_res))
                     }
@@ -190,8 +190,8 @@ impl Client {
             let (_, body) = r.into_parts();
             let body_string = String::from_utf8(body);
 
-            futures::future::result(body_string).map_err(|_| {
-                io::Error::from(io::ErrorKind::InvalidData)
+            futures::future::result(body_string).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, e)
             })
         })
     }
@@ -236,7 +236,7 @@ impl Client {
             futures::future::result(parsed).map_err(|e| {
                 error!("Unable to parse json GET response: {:?}", e);
 
-                io::Error::from(io::ErrorKind::InvalidData)
+                io::Error::new(io::ErrorKind::Other, e)
             })
         }))
     }
@@ -361,13 +361,13 @@ fn read_all(
             true => f_res.unwrap(),
         };
 
-        let body_vec = match chunk_encoding {
+        match chunk_encoding {
             true => join_chunks(&mut vec, body_start_index),
             // not sure if the last param here is correct
             false => join_body(&mut vec, body_start_index, content_length),
         };
 
-        let client_res = apply_body_to_res(f_res, body_vec);
+        let client_res = apply_body_to_res(f_res, vec);
 
         futures::future::ok(client_res)
     }))
@@ -427,9 +427,7 @@ fn check_content_length(res: &httparse::Response) -> u32 {
     0
 }
 
-fn join_body(vec: &mut Vec<u8>, body_start_index: usize, body_length: usize) -> Vec<u8> {
-    let mut vec2: Vec<u8> = Vec::new();
-
+fn join_body(vec: &mut Vec<u8>, body_start_index: usize, body_length: usize) {
     let body_end: usize;
     if body_length == 0 {
         body_end = vec.len() - 2;
@@ -438,14 +436,12 @@ fn join_body(vec: &mut Vec<u8>, body_start_index: usize, body_length: usize) -> 
     }
 
     // -2 to remove trailing chars
-    vec2.extend_from_slice(&vec[body_start_index..body_end]);
-
-    vec2
+    vec.drain(..body_start_index);
+    vec.truncate(body_end - body_start_index);
 }
 
-fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) -> Vec<u8> {
+fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) {
     let mut start_index = body_start_index;
-    let mut vec2: Vec<u8> = Vec::new();
 
     loop {
         let chunk_size = get_chunk_size(vec, start_index);
@@ -453,12 +449,12 @@ fn join_chunks(vec: &mut Vec<u8>, body_start_index: usize) -> Vec<u8> {
             break;
         }
         let chunk_end = start_index + chunk_size as usize;
-        vec2.extend_from_slice(&vec[start_index..chunk_end + 1]);
+        // I dont know if this is correct
+        vec.drain((chunk_end + 1)..(chunk_end + 3));
+        //vec2.extend_from_slice(&vec[start_index..chunk_end + 1]);
 
         start_index = chunk_end + 2;
     }
-
-    vec2
 }
 
 // returns (chunk_size, byte size of the chunk_size)

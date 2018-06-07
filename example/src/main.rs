@@ -2,6 +2,7 @@ extern crate tokio;
 extern crate reqx;
 extern crate futures;
 extern crate serde;
+extern crate http;
 extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
@@ -22,14 +23,16 @@ pub struct HeartbeatData {
 
 fn main() {
     let request = reqx::ClientRequest {
-        url: "http://localhost:1995/trader/data/increment?base=btc&counter=usd&exchange=gdax&id=2",
+        url: "http://localhost:1995/trader/data/replace?base=eth&counter=usdt&exchange=binance&id=108",
         body: None,
+        method: http::method::Method::GET,
     };
 
     let c = reqx::Client {};
 
-    let jfut = c.json_get::<IncrementDataWrapper<USDNumeric>>(request).map_err(|e| {
+    let jfut = c.json::<(), ReplacementDataWrapper<USDNumeric>>(request).map_err(|e| {
         println!("err: {:?}", e);
+
         ()
     });
 

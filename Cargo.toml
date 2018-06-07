@@ -1,10 +1,10 @@
 [package]
 name = "reqx"
-version = "0.1.8"
+version = "0.1.9"
 authors = ["Alex Smith <donnytyler.com>"]
 
 [dependencies]
-tokio = "0.1"
+tokio = "0.1.5"
 tokio-io = "0.1"
 url = "1.7"
 httparse = "1.2"
