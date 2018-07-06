@@ -28,7 +28,7 @@ fn main() {
         method: http::method::Method::GET,
     };
 
-    let c = reqx::Client {};
+    let c = reqx::Client::default();
 
     let jfut = c.json::<(), ReplacementDataWrapper<USDNumeric>>(request).map_err(|e| {
         println!("err: {:?}", e);
