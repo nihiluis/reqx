@@ -23,6 +23,28 @@ pub struct HeartbeatData {
 
 fn main() {
     let request = reqx::ClientRequest {
+        url: "http://api.jikan.moe/",
+        body: None,
+        method: http::method::Method::GET,
+    };
+
+    let c = reqx::Client::default();
+
+    let jfut = c.string(request).map_err(|e| {
+        println!("err: {:?}", e);
+
+        ()
+    });
+
+    tokio::run(jfut.map(|x| {
+        println!("{:?}", x);
+
+        ()
+    }));
+}
+
+fn main_2() {
+    let request = reqx::ClientRequest {
         url: "http://localhost:1995/trader/data/replace?base=eth&counter=usdt&exchange=binance&id=108",
         body: None,
         method: http::method::Method::GET,
@@ -30,11 +52,12 @@ fn main() {
 
     let c = reqx::Client::default();
 
-    let jfut = c.json::<(), ReplacementDataWrapper<USDNumeric>>(request).map_err(|e| {
-        println!("err: {:?}", e);
+    let jfut = c.json::<(), ReplacementDataWrapper<USDNumeric>>(request)
+        .map_err(|e| {
+            println!("err: {:?}", e);
 
-        ()
-    });
+            ()
+        });
 
     tokio::run(jfut.map(|x| {
         println!("{:?}", x);

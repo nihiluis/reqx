@@ -13,6 +13,8 @@ extern crate byteorder;
 #[macro_use]
 extern crate log;
 
+mod pool;
+
 use std::net::ToSocketAddrs;
 use std::io;
 use std::time::{Duration, Instant};
@@ -24,30 +26,12 @@ use bytes::{BufMut, BytesMut};
 use tokio::util::FutureExt;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use pool::{PooledStream, Pool};
 
 const INITIAL_BUF_SIZE: usize = 512;
 
 pub struct Client {
     pool: Arc<Mutex<Pool>>,
-}
-
-type Key = (String, u16);
-
-struct PooledStream<S> {
-    inner: Option<PooledStreamInner<S>>,
-    is_closed: bool,
-    pool: Arc<Mutex<PoolImpl<S>>>,
-}
-
-#[derive(Debug)]
-struct PooledStreamInner<S> {
-    key: Key,
-    stream: S,
-    previous_response_expected_no_content: bool,
-}
-
-struct Pool {
-    conns: HashMap<Key, Vec<TcpStream>>,
 }
 
 pub struct ClientRequest<'a, A> {
@@ -60,7 +44,7 @@ type ClientResponse = http::Response<Vec<u8>>;
 
 impl Client {
     pub fn default() -> Self {
-        Client { pool: Arc::new(Mutex::new(Pool { conns: HashMap::new() })) }
+        Client { pool: Arc::new(Mutex::new(Pool::new())) }
     }
 
     fn request(
@@ -119,12 +103,10 @@ impl Client {
 
         let when = Instant::now() + Duration::from_secs(5);
 
-        {
-            let conn_map = self.pool.lock().unwrap();
-            if conn_map.conns.contains_key(&(host.to_string(), port)) {}
-        }
-
-        let tcp = TcpStream::connect(&socket_addr);
+        let tcp = self.pool
+            .lock()
+            .expect("unable to get pool lock")
+            .get_conn((Arc::new(host.to_string()), port));
 
         let base_fut = tcp.and_then(move |stream| {
             tokio::io::write_all(stream, dst_vec)
@@ -209,7 +191,7 @@ impl Client {
 
     fn continue_read(
         self,
-        stream: TcpStream,
+        stream: PooledStream,
         vec: Vec<u8>,
         res_complete: bool,
         f_res: Option<http::Response<()>>,
@@ -237,7 +219,7 @@ impl Client {
 
     fn read_all(
         self,
-        stream: TcpStream,
+        stream: PooledStream,
         vec: Vec<u8>,
         res_complete: bool,
         chunk_encoding: bool,
