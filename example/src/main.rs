@@ -44,7 +44,7 @@ fn main() {
 }
 
 fn test2(c: reqx::Client) {
-    std::thread::sleep_ms(3000);
+    std::thread::sleep_ms(30000);
 
     let request = reqx::ClientRequest {
         url: "https://min-api.cryptocompare.com/data/histoday?fsym=BTC&tsym=USD&limit=10&aggregate=3&e=CCCAGG",

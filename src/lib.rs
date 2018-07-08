@@ -1,4 +1,4 @@
-//#![feature(nll)]
+#![feature(nll)]
 
 extern crate http;
 extern crate url;
@@ -15,10 +15,8 @@ extern crate log;
 
 mod pool;
 
-use std::net::ToSocketAddrs;
 use std::io;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
 use http::Request;
 use http::Uri;
 use futures::Future;
@@ -26,11 +24,11 @@ use http::HeaderMap;
 use bytes::{BufMut, BytesMut};
 use tokio::util::FutureExt;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 use pool::{PooledStream, Pool};
 
 const INITIAL_BUF_SIZE: usize = 512;
 
+#[derive(Clone)]
 pub struct Client {
     pool: Arc<Mutex<Pool>>,
 }
@@ -71,227 +69,37 @@ impl Client {
                 .expect("Header Value from Content Length may not fail"),
         );
 
-        let mut socket_addrs = (host.as_ref(), port).to_socket_addrs().unwrap();
-        let socket_addr = socket_addrs.next().unwrap();
-
         let mut dst_vec: Vec<u8> = Vec::new();
-        let dst = &mut dst_vec;
+        {
+            let dst = &mut dst_vec;
 
-        let query_path = uri.path_and_query()
-            .expect("path and query is expected to work")
-            .clone();
+            let query_path = uri.path_and_query()
+                .expect("path and query is expected to work")
+                .clone();
 
-        extend(dst, method.as_str().as_bytes());
-        extend(dst, b" ");
-        extend(dst, query_path.path().as_bytes());
-        let query = query_path.query();
-        if query.is_some() {
-            extend(dst, b"?");
-            extend(dst, query.unwrap().as_bytes());
+            extend(dst, method.as_str().as_bytes());
+            extend(dst, b" ");
+            extend(dst, query_path.path().as_bytes());
+            let query = query_path.query();
+            if query.is_some() {
+                extend(dst, b"?");
+                extend(dst, query.unwrap().as_bytes());
+            }
+            extend(dst, b" ");
+            extend(dst, b"HTTP/1.1\r\nHost: ");
+            extend(dst, host.as_bytes());
+            extend(dst, b"\r\n");
+
+            write_headers(&mut headers, dst);
+
+            extend(dst, b"\r\n");
+
+            if content_length > 0 {
+                extend(dst, &body.unwrap());
+            }
         }
-        extend(dst, b" ");
-        extend(dst, b"HTTP/1.1\r\nHost: ");
-        extend(dst, host.as_bytes());
-        extend(dst, b"\r\n");
 
-        write_headers(&mut headers, dst);
-
-        extend(dst, b"\r\n");
-
-        if content_length > 0 {
-            extend(dst, &body.unwrap());
-        }
-
-        self.begin_read((Arc::new(host), port), dst_vec)
-    }
-
-    fn begin_read(
-        &self,
-        key: (Arc<String>, u16),
-        dst_vec: Vec<u8>,
-    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
-        let when = Instant::now() + Duration::from_secs(5);
-
-        /*        self.pool
-            .lock()
-            .expect("unable to get pool lock")
-            .get_conn(key)
-            */
-        let mut socket_addrs = ((*key.0).as_ref(), key.1).to_socket_addrs().unwrap();
-        let socket_addr = socket_addrs.next().unwrap();
-        TcpStream::connect(&socket_addr).and_then(move |stream| {
-            tokio::io::write_all(stream, dst_vec)
-                .and_then(|(stream, _)| {
-                    let initial_vec: Vec<u8> = vec![0; INITIAL_BUF_SIZE];
-                    tokio_io::io::read(stream, initial_vec)
-                })
-                .and_then(move |(stream, mut vec, _)| {
-                    // TODO this is missing atm
-                    let content_length: usize;
-
-                    let mut body_complete = false;
-                    let mut res_complete = false;
-                    let chunked_encoding: bool;
-
-                    let f_res: Option<http::Response<()>>;
-                    let code: u16;
-
-                    {
-                        let mut headers = [httparse::EMPTY_HEADER; 16];
-                        let mut res = httparse::Response::new(&mut headers);
-
-                        res_complete |= res.parse(&vec)
-                            .expect("response should not be broken")
-                            .is_complete();
-
-                        code = res.code.unwrap_or(0);
-                        chunked_encoding = check_chunk_encoded(&res);
-                        content_length = check_content_length(&res) as usize;
-
-                        f_res = match res_complete {
-                            true => Some(get_res(res)),
-                            false => None,
-                        };
-                    }
-
-                    let mut body_start_index = 0;
-                    if res_complete {
-                        body_start_index = get_body_start_index(&vec);
-                    }
-
-                    if content_length != 0 &&
-                        content_length + body_start_index <= INITIAL_BUF_SIZE ||
-                        vec.len() < INITIAL_BUF_SIZE
-                    {
-                        vec.truncate(body_start_index + content_length);
-                        body_complete = true;
-                    }
-
-                    if code == 301 {
-                        // unhandled redirect
-                        error!("Unable to handle redirect.");
-                        return futures::future::Either::B(
-                            futures::future::err(io::Error::from(io::ErrorKind::Other)),
-                        );
-                    }
-
-                    if !body_complete {
-                        futures::future::Either::A(self.continue_read(
-                            stream,
-                            vec,
-                            res_complete,
-                            f_res,
-                            chunked_encoding,
-                            body_start_index,
-                            content_length,
-                        ))
-                    } else {
-                        join_body(&mut vec, body_start_index, content_length);
-
-                        let client_res = apply_body_to_res(f_res.unwrap(), vec);
-
-                        futures::future::Either::B(futures::future::ok(client_res))
-                    }
-                })
-                .deadline(when)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-        })
-    }
-
-    fn continue_read(
-        &self,
-        stream: TcpStream,
-        vec: Vec<u8>,
-        res_complete: bool,
-        f_res: Option<http::Response<()>>,
-        chunk_encoded: bool,
-        body_start_index: usize,
-        content_length: usize,
-    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
-        // maybe I should resolve body_start_index here later
-    /*
-    if chunk_encoded && body_start_index != 0 {
-
-    } else {
-    */
-        // this is not preferred because it's slow
-        self.read_all(
-            stream,
-            vec,
-            res_complete,
-            chunk_encoded,
-            f_res,
-            body_start_index,
-            content_length,
-        )
-    }
-
-    fn read_all(
-        &self,
-        stream: TcpStream,
-        vec: Vec<u8>,
-        res_complete: bool,
-        chunk_encoding: bool,
-        f_res: Option<http::Response<()>>,
-        mut body_start_index: usize,
-        content_length: usize,
-    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
-        // this can be easily replaced with read_to_end
-        let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
-          mut vec,
-          mut read_len,
-          zero_len_count)| {
-            tokio_io::io::read(stream, vec![0; 1024]).and_then(move |(stream, mut vec2, len)| {
-                if len == 0 {
-                    return Ok(futures::future::Loop::Break(
-                        (stream, vec, read_len, zero_len_count),
-                    ));
-                }
-
-                vec2.truncate(len);
-                read_len += len;
-
-                vec.extend_from_slice(&vec2);
-
-                Ok(futures::future::Loop::Continue(
-                    (stream, vec, read_len, zero_len_count),
-                ))
-            })
-        });
-
-        fut.and_then(move |(stream, mut vec, _, _)| {
-            let f_res = match res_complete {
-                false => {
-                    body_start_index = get_body_start_index(&vec);
-                    let lines_to_body = count_lines(&vec[0..body_start_index]) - 3;
-
-                    let headers_size: usize;
-                    if lines_to_body > 0 {
-                        headers_size = lines_to_body as usize + 2;
-                    } else {
-                        headers_size = 32;
-                    }
-
-                    let mut headers = vec![httparse::EMPTY_HEADER; headers_size];
-                    let mut n_res = httparse::Response::new(&mut headers);
-
-                    n_res.parse(&vec).expect("response should not be broken");
-
-                    get_res(n_res)
-                }
-                true => f_res.unwrap(),
-            };
-
-            match chunk_encoding {
-                true => join_chunks(&mut vec, body_start_index),
-                // not sure if the last param here is correct
-                false => join_body(&mut vec, body_start_index, content_length),
-            };
-
-            let client_res = apply_body_to_res(f_res, vec);
-
-            futures::future::ok(client_res)
-        })
+        begin_read(self.clone(), (Arc::new(host), port), dst_vec)
     }
 
     pub fn string<'a>(
@@ -359,6 +167,190 @@ impl Client {
             })
         }))
     }
+}
+
+fn begin_read(
+    client: Client,
+    key: (Arc<String>, u16),
+    dst_vec: Vec<u8>,
+) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
+    let when = Instant::now() + Duration::from_secs(5);
+
+    client.pool
+        .lock()
+        .expect("unable to get pool lock")
+        .get_conn(key)
+        .and_then(move |stream| {
+            tokio::io::write_all(stream, dst_vec)
+                .and_then(|(stream, _)| {
+                    let initial_vec: Vec<u8> = vec![0; INITIAL_BUF_SIZE];
+                    tokio_io::io::read(stream, initial_vec)
+                })
+                .and_then(move |(stream, mut vec, _)| {
+                    // TODO this is missing atm
+                    let content_length: usize;
+
+                    let mut body_complete = false;
+                    let mut res_complete = false;
+                    let chunked_encoding: bool;
+
+                    let f_res: Option<http::Response<()>>;
+                    let code: u16;
+
+                    {
+                        let mut headers = [httparse::EMPTY_HEADER; 16];
+                        let mut res = httparse::Response::new(&mut headers);
+
+                        res_complete |= res.parse(&vec)
+                            .expect("response should not be broken")
+                            .is_complete();
+
+                        code = res.code.unwrap_or(0);
+                        chunked_encoding = check_chunk_encoded(&res);
+                        content_length = check_content_length(&res) as usize;
+
+                        f_res = match res_complete {
+                            true => Some(get_res(res)),
+                            false => None,
+                        };
+                    }
+
+                    let mut body_start_index = 0;
+                    if res_complete {
+                        body_start_index = get_body_start_index(&vec);
+                    }
+
+                    if content_length != 0 &&
+                        content_length + body_start_index <= INITIAL_BUF_SIZE ||
+                        vec.len() < INITIAL_BUF_SIZE
+                    {
+                        vec.truncate(body_start_index + content_length);
+                        body_complete = true;
+                    }
+
+                    if code == 301 {
+                        // unhandled redirect
+                        error!("Unable to handle redirect.");
+                        return futures::future::Either::B(
+                            futures::future::err(io::Error::from(io::ErrorKind::Other)),
+                        );
+                    }
+
+                    if !body_complete {
+                        futures::future::Either::A(continue_read(
+                            stream,
+                            vec,
+                            res_complete,
+                            f_res,
+                            chunked_encoding,
+                            body_start_index,
+                            content_length,
+                        ))
+                    } else {
+                        join_body(&mut vec, body_start_index, content_length);
+
+                        let client_res = apply_body_to_res(f_res.unwrap(), vec);
+
+                        futures::future::Either::B(futures::future::ok(client_res))
+                    }
+                })
+                .deadline(when)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        })
+}
+
+fn continue_read(
+    stream: PooledStream,
+    vec: Vec<u8>,
+    res_complete: bool,
+    f_res: Option<http::Response<()>>,
+    chunk_encoded: bool,
+    body_start_index: usize,
+    content_length: usize,
+) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
+    // maybe I should resolve body_start_index here later
+    /*
+    if chunk_encoded && body_start_index != 0 {
+
+    } else {
+    */
+    // this is not preferred because it's slow
+    read_all(
+        stream,
+        vec,
+        res_complete,
+        chunk_encoded,
+        f_res,
+        body_start_index,
+        content_length,
+    )
+}
+
+fn read_all(
+    stream: PooledStream,
+    vec: Vec<u8>,
+    res_complete: bool,
+    chunk_encoding: bool,
+    f_res: Option<http::Response<()>>,
+    mut body_start_index: usize,
+    content_length: usize,
+) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
+    // this can be easily replaced with read_to_end
+    let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
+      mut vec,
+      mut read_len,
+      zero_len_count)| {
+        tokio_io::io::read(stream, vec![0; 1024]).and_then(move |(stream, mut vec2, len)| {
+            if len == 0 {
+                return Ok(futures::future::Loop::Break(
+                    (stream, vec, read_len, zero_len_count),
+                ));
+            }
+
+            vec2.truncate(len);
+            read_len += len;
+
+            vec.extend_from_slice(&vec2);
+
+            Ok(futures::future::Loop::Continue(
+                (stream, vec, read_len, zero_len_count),
+            ))
+        })
+    });
+
+    fut.and_then(move |(_, mut vec, _, _)| {
+        let f_res = match res_complete {
+            false => {
+                body_start_index = get_body_start_index(&vec);
+                let lines_to_body = count_lines(&vec[0..body_start_index]) - 3;
+
+                let headers_size: usize;
+                if lines_to_body > 0 {
+                    headers_size = lines_to_body as usize + 2;
+                } else {
+                    headers_size = 32;
+                }
+
+                let mut headers = vec![httparse::EMPTY_HEADER; headers_size];
+                let mut n_res = httparse::Response::new(&mut headers);
+
+                n_res.parse(&vec).expect("response should not be broken");
+
+                get_res(n_res)
+            }
+            true => f_res.unwrap(),
+        };
+
+        match chunk_encoding {
+            true => join_chunks(&mut vec, body_start_index),
+            // not sure if the last param here is correct
+            false => join_body(&mut vec, body_start_index, content_length),
+        };
+
+        let client_res = apply_body_to_res(f_res, vec);
+
+        futures::future::ok(client_res)
+    })
 }
 
 #[inline]
