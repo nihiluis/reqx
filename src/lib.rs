@@ -1,4 +1,4 @@
-#![feature(nll)]
+//#![feature(nll)]
 
 extern crate http;
 extern crate url;
@@ -20,6 +20,7 @@ use std::io;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use http::Request;
+use http::Uri;
 use futures::Future;
 use http::HeaderMap;
 use bytes::{BufMut, BytesMut};
@@ -48,11 +49,11 @@ impl Client {
     }
 
     fn request(
-        self,
+        &self,
         req: Request<Option<Vec<u8>>>,
-    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send + 'static {
-        let uri = req.uri().clone();
-        let host = uri.host().unwrap();
+    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
+        let uri: Uri = req.uri().clone();
+        let host = uri.host().unwrap().to_owned();
         let port = if let Some(p) = uri.port() { p } else { 80 };
 
         let (parts, body) = req.into_parts();
@@ -70,7 +71,7 @@ impl Client {
                 .expect("Header Value from Content Length may not fail"),
         );
 
-        let mut socket_addrs = (host, port).to_socket_addrs().unwrap();
+        let mut socket_addrs = (host.as_ref(), port).to_socket_addrs().unwrap();
         let socket_addr = socket_addrs.next().unwrap();
 
         let mut dst_vec: Vec<u8> = Vec::new();
@@ -101,14 +102,24 @@ impl Client {
             extend(dst, &body.unwrap());
         }
 
+        self.begin_read((Arc::new(host), port), dst_vec)
+    }
+
+    fn begin_read(
+        &self,
+        key: (Arc<String>, u16),
+        dst_vec: Vec<u8>,
+    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
         let when = Instant::now() + Duration::from_secs(5);
 
-        let tcp = self.pool
+        /*        self.pool
             .lock()
             .expect("unable to get pool lock")
-            .get_conn((Arc::new(host.to_string()), port));
-
-        let base_fut = tcp.and_then(move |stream| {
+            .get_conn(key)
+            */
+        let mut socket_addrs = ((*key.0).as_ref(), key.1).to_socket_addrs().unwrap();
+        let socket_addr = socket_addrs.next().unwrap();
+        TcpStream::connect(&socket_addr).and_then(move |stream| {
             tokio::io::write_all(stream, dst_vec)
                 .and_then(|(stream, _)| {
                     let initial_vec: Vec<u8> = vec![0; INITIAL_BUF_SIZE];
@@ -184,21 +195,19 @@ impl Client {
                 })
                 .deadline(when)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-        });
-
-        base_fut
+        })
     }
 
     fn continue_read(
-        self,
-        stream: PooledStream,
+        &self,
+        stream: TcpStream,
         vec: Vec<u8>,
         res_complete: bool,
         f_res: Option<http::Response<()>>,
         chunk_encoded: bool,
         body_start_index: usize,
         content_length: usize,
-    ) -> impl Future<Item = ClientResponse, Error = io::Error> {
+    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
         // maybe I should resolve body_start_index here later
     /*
     if chunk_encoded && body_start_index != 0 {
@@ -218,15 +227,15 @@ impl Client {
     }
 
     fn read_all(
-        self,
-        stream: PooledStream,
+        &self,
+        stream: TcpStream,
         vec: Vec<u8>,
         res_complete: bool,
         chunk_encoding: bool,
         f_res: Option<http::Response<()>>,
         mut body_start_index: usize,
         content_length: usize,
-    ) -> Box<Future<Item = ClientResponse, Error = io::Error> + Send + 'static> {
+    ) -> impl Future<Item = ClientResponse, Error = io::Error> + Send {
         // this can be easily replaced with read_to_end
         let fut = futures::future::loop_fn((stream, vec, 0, 0), |(stream,
           mut vec,
@@ -250,7 +259,7 @@ impl Client {
             })
         });
 
-        Box::new(fut.and_then(move |(stream, mut vec, _, _)| {
+        fut.and_then(move |(stream, mut vec, _, _)| {
             let f_res = match res_complete {
                 false => {
                     body_start_index = get_body_start_index(&vec);
@@ -282,17 +291,17 @@ impl Client {
             let client_res = apply_body_to_res(f_res, vec);
 
             futures::future::ok(client_res)
-        }))
+        })
     }
 
     pub fn string<'a>(
-        self,
+        &self,
         client_req: ClientRequest<'a, Vec<u8>>,
-    ) -> impl Future<Item = String, Error = io::Error> {
+    ) -> impl Future<Item = String, Error = io::Error> + Send {
         let req = http::Request::builder()
             .uri(client_req.url)
             .method(client_req.method)
-            .header(http::header::CONNECTION, "close")
+            //.header(http::header::CONNECTION, "close")
             .body(client_req.body)
             .unwrap();
 
@@ -307,7 +316,7 @@ impl Client {
     }
 
     pub fn json<'a, A, B>(
-        self,
+        &self,
         client_req: ClientRequest<'a, A>,
     ) -> impl Future<Item = B, Error = io::Error>
     where
@@ -320,8 +329,8 @@ impl Client {
             .uri(client_req.url)
             .method(client_req.method)
             .header(http::header::CONTENT_TYPE, "application/json")
-            .header(http::header::ACCEPT, "application/json")
-            .header(http::header::CONNECTION, "close");
+            //.header(http::header::CONNECTION, "close")
+            .header(http::header::ACCEPT, "application/json");
 
         let req = match client_req.body {
             Some(b) => {

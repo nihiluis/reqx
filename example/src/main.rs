@@ -23,7 +23,7 @@ pub struct HeartbeatData {
 
 fn main() {
     let request = reqx::ClientRequest {
-        url: "http://api.jikan.moe/",
+        url: "https://min-api.cryptocompare.com/data/histoday?fsym=BTC&tsym=USD&limit=10&aggregate=3&e=CCCAGG",
         body: None,
         method: http::method::Method::GET,
     };
@@ -36,7 +36,29 @@ fn main() {
         ()
     });
 
-    tokio::run(jfut.map(|x| {
+    tokio::run(jfut.map(move |x| {
+        println!("{:?}", x);
+
+        test2(c)
+    }));
+}
+
+fn test2(c: reqx::Client) {
+    std::thread::sleep_ms(3000);
+
+    let request = reqx::ClientRequest {
+        url: "https://min-api.cryptocompare.com/data/histoday?fsym=BTC&tsym=USD&limit=10&aggregate=3&e=CCCAGG",
+        body: None,
+        method: http::method::Method::GET,
+    };
+
+    let jfut = c.string(request).map_err(|e| {
+        println!("err: {:?}", e);
+
+        ()
+    });
+
+    tokio::spawn(jfut.map(|x| {
         println!("{:?}", x);
 
         ()
