@@ -1,13 +1,16 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
 use futures::{self, Future};
+use futures::sync::oneshot;
 use std::net::ToSocketAddrs;
 use std::fmt::Arguments;
 use std::io;
 use tokio;
-use tokio::prelude::{Read, Write, Async, AsyncRead, AsyncWrite};
+use tokio::prelude::{Read, Write, Async, AsyncRead, Poll, AsyncWrite};
 use bytes;
+use std::time::{Duration, Instant};
+use tokio::timer::Interval;
 
 type Key = (Arc<String>, u16);
 
@@ -24,6 +27,7 @@ impl PooledStream {
                 key: key,
                 stream: stream,
                 is_closed: false,
+                idle_at: Instant::now(),
             }),
             pool: pool,
         }
@@ -100,7 +104,10 @@ struct PooledStreamInner {
     key: Key,
     stream: TcpStream,
     is_closed: bool,
+    idle_at: Instant,
 }
+
+const CONN_MAX_IDLE_TIME: Duration = Duration::from_millis(500);
 
 pub struct Pool {
     inner: Arc<Mutex<PoolInner>>,
@@ -114,7 +121,12 @@ impl Clone for Pool {
 
 impl Pool {
     pub fn new() -> Self {
-        Pool { inner: Arc::new(Mutex::new(PoolInner { conns: HashMap::new() })) }
+        Pool {
+            inner: Arc::new(Mutex::new(PoolInner {
+                conns: HashMap::new(),
+                idle_interval_ref: None,
+            })),
+        }
     }
 
     pub fn get_conn(
@@ -161,6 +173,7 @@ impl Pool {
 #[derive(Debug)]
 pub struct PoolInner {
     conns: HashMap<Key, Vec<PooledStream>>,
+    idle_interval_ref: Option<oneshot::Sender<()>>,
 }
 
 impl PoolInner {
@@ -178,13 +191,22 @@ impl PoolInner {
         }
     }
 
-    fn _clear_expired(&mut self) {
+    fn clear_expired(&mut self) {
+        let now = Instant::now();
+
         self.conns.retain(|_, values| {
             values.retain(|entry| {
-                if let Some(ref self_inner) = entry.inner {
-                    if self_inner.is_closed {
+                if let Some(ref inner) = entry.inner {
+                    if inner.is_closed {
                         return false;
                     }
+
+                    if now - inner.idle_at > CONN_MAX_IDLE_TIME {
+                        trace!("idle interval evicting expired for {:?}", inner.key);
+                        return false;
+                    }
+                } else {
+                    return false;
                 }
 
                 true
@@ -213,18 +235,87 @@ impl PoolInner {
             );
         }
     }
+
+    fn spawn_idle_interval(&mut self, pool_ref: &Arc<Mutex<PoolInner>>) {
+        let (dur, rx) = {
+            if self.idle_interval_ref.is_some() {
+                return;
+            }
+
+            let (tx, rx) = oneshot::channel();
+            self.idle_interval_ref = Some(tx);
+            (CONN_MAX_IDLE_TIME, rx)
+        };
+
+        let start = Instant::now() + dur;
+
+        let interval = IdleInterval {
+            interval: Interval::new(start, dur),
+            pool: Arc::downgrade(pool_ref),
+            pool_drop_notifier: rx,
+        };
+
+        tokio::spawn(interval);
+    }
 }
 
 impl Drop for PooledStream {
     fn drop(&mut self) {
         if let Some(ref mut self_inner) = self.inner {
             if !self_inner.is_closed {
+                let pool_clone = self.pool.clone();
                 if let Ok(ref mut pool) = self.pool.try_lock() {
                     trace!("adding stream back to pool");
-                    let inner = self.inner.take().unwrap();
+                    let mut inner = self.inner.take().unwrap();
+                    inner.idle_at = Instant::now();
+                    pool.spawn_idle_interval(&pool_clone);
                     pool.push(inner.key.clone(), inner, self.pool.clone());
                 }
             }
+        }
+    }
+}
+
+struct IdleInterval {
+    interval: Interval,
+    pool: Weak<Mutex<PoolInner>>,
+    // This allows the IdleInterval to be notified as soon as the entire
+    // Pool is fully dropped, and shutdown. This channel is never sent on,
+    // but Err(Canceled) will be received when the Pool is dropped.
+    pool_drop_notifier: oneshot::Receiver<()>,
+}
+
+impl Future for IdleInterval {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        // Interval is a Stream
+        use futures::Stream;
+
+        loop {
+            match self.pool_drop_notifier.poll() {
+                //Ok(Async::Ready(n)) => match n {},
+                Ok(Async::Ready(_n)) => (),
+                Ok(Async::NotReady) => (),
+                Err(_canceled) => {
+                    trace!("pool closed, canceling idle interval");
+                    return Ok(Async::Ready(()));
+                }
+            }
+
+            try_ready!(self.interval.poll().map_err(|err| {
+                error!("idle interval timer error: {}", err);
+            }));
+
+            if let Some(inner_lock) = self.pool.upgrade() {
+                if let Ok(mut inner) = inner_lock.lock() {
+                    trace!("idle interval checking for expired");
+                    inner.clear_expired();
+                    continue;
+                }
+            }
+            return Ok(Async::Ready(()));
         }
     }
 }

@@ -36,16 +36,18 @@ fn main() {
         ()
     });
 
-    tokio::run(jfut.map(move |x| {
-        println!("{:?}", x);
+    tokio::run(futures::future::lazy(|| {
+        jfut.map(move |x| {
+            println!("{:?}", x);
 
-        test2(c)
+            for i in 0..5 {
+                test2(&c);
+            }
+        })
     }));
 }
 
-fn test2(c: reqx::Client) {
-    std::thread::sleep_ms(30000);
-
+fn test2(c: &reqx::Client) {
     let request = reqx::ClientRequest {
         url: "https://min-api.cryptocompare.com/data/histoday?fsym=BTC&tsym=USD&limit=10&aggregate=3&e=CCCAGG",
         body: None,
@@ -58,11 +60,7 @@ fn test2(c: reqx::Client) {
         ()
     });
 
-    tokio::spawn(jfut.map(|x| {
-        println!("{:?}", x);
-
-        ()
-    }));
+    tokio::spawn(jfut.map(|x| println!("{:?}", x)));
 }
 
 fn main_2() {

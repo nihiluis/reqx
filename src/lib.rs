@@ -4,6 +4,7 @@ extern crate http;
 extern crate url;
 extern crate tokio;
 extern crate httparse;
+#[macro_use]
 extern crate futures;
 extern crate serde;
 extern crate serde_json;
