@@ -107,8 +107,6 @@ struct PooledStreamInner {
     idle_at: Instant,
 }
 
-const CONN_MAX_IDLE_TIME: Duration = Duration::from_millis(500);
-
 pub struct Pool {
     inner: Arc<Mutex<PoolInner>>,
 }
@@ -121,10 +119,19 @@ impl Clone for Pool {
 
 impl Pool {
     pub fn new() -> Self {
+        Pool::new_with_config(PoolConfig {
+            conn_max_idle_time: Duration::from_millis(500),
+            reuse_conns: true,
+        })
+    }
+
+    #[inline]
+    pub fn new_with_config(config: PoolConfig) -> Self {
         Pool {
             inner: Arc::new(Mutex::new(PoolInner {
                 conns: HashMap::new(),
                 idle_interval_ref: None,
+                config: config,
             })),
         }
     }
@@ -136,17 +143,17 @@ impl Pool {
         let pool_clone = self.inner.clone();
 
         if let Ok(ref mut inner) = self.inner.try_lock() {
-            inner.clear_expired_key(&key);
+            if inner.config.reuse_conns {
+                let mut opt_streams = inner.conns.get_mut(&key);
+                if let Some(ref mut streams) = opt_streams {
+                    let opt_stream = streams.pop();
+                    if let Some(stream) = opt_stream {
+                        trace!("reusing pool conn");
 
-            let mut opt_streams = inner.conns.get_mut(&key);
-            if let Some(ref mut streams) = opt_streams {
-                let opt_stream = streams.pop();
-                if let Some(stream) = opt_stream {
-                    trace!("reusing pool conn");
-
-                    return Box::new(tokio::io::write_all(stream, b"").and_then(|(stream, _)| {
-                        futures::future::ok(stream)
-                    }));
+                        return Box::new(tokio::io::write_all(stream, b"").and_then(|(stream, _)| {
+                            futures::future::ok(stream)
+                        }));
+                    }
                 }
             }
         }
@@ -174,6 +181,13 @@ impl Pool {
 pub struct PoolInner {
     conns: HashMap<Key, Vec<PooledStream>>,
     idle_interval_ref: Option<oneshot::Sender<()>>,
+    config: PoolConfig,
+}
+
+#[derive(Debug)]
+pub struct PoolConfig {
+    conn_max_idle_time: Duration,
+    reuse_conns: bool,
 }
 
 impl PoolInner {
@@ -193,6 +207,7 @@ impl PoolInner {
 
     fn clear_expired(&mut self) {
         let now = Instant::now();
+        let conn_max_idle_time = &self.config.conn_max_idle_time;
 
         self.conns.retain(|_, values| {
             values.retain(|entry| {
@@ -201,7 +216,7 @@ impl PoolInner {
                         return false;
                     }
 
-                    if now - inner.idle_at > CONN_MAX_IDLE_TIME {
+                    if now - inner.idle_at > *conn_max_idle_time {
                         trace!("idle interval evicting expired for {:?}", inner.key);
                         return false;
                     }
@@ -244,7 +259,7 @@ impl PoolInner {
 
             let (tx, rx) = oneshot::channel();
             self.idle_interval_ref = Some(tx);
-            (CONN_MAX_IDLE_TIME, rx)
+            (self.config.conn_max_idle_time, rx)
         };
 
         let start = Instant::now() + dur;
@@ -266,10 +281,12 @@ impl Drop for PooledStream {
                 let pool_clone = self.pool.clone();
                 if let Ok(ref mut pool) = self.pool.try_lock() {
                     trace!("adding stream back to pool");
-                    let mut inner = self.inner.take().unwrap();
-                    inner.idle_at = Instant::now();
-                    pool.spawn_idle_interval(&pool_clone);
-                    pool.push(inner.key.clone(), inner, self.pool.clone());
+                    if pool.config.reuse_conns {
+                        let mut inner = self.inner.take().unwrap();
+                        inner.idle_at = Instant::now();
+                        pool.spawn_idle_interval(&pool_clone);
+                        pool.push(inner.key.clone(), inner, self.pool.clone());
+                    }
                 }
             }
         }
